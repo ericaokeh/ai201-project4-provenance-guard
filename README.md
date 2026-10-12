@@ -9,7 +9,7 @@ Full design notes, signal analysis, and diagrams are in [planning.md](planning.m
 1. `POST /submit` receives up to 20,000 characters of text. The **rate limiter** (5/min, 50/day per IP) runs first.
 2. The **validator** rejects empty or oversized text and counts words.
 3. **Signal 1 (LLM, Groq)** rates how AI-like the text reads and gives reasons.
-4. **Signal 2 (stylometric heuristics)** measures the em-dash rate, "it's not X, it's Y" contrast frames, and sentence-length variation.
+4. **Signal 2 (stylometric heuristics)** measures sentence-length variation (burstiness), vocabulary variety (MATTR), the em-dash rate, and "it's not X, it's Y" contrast frames, weighted toward the features every text has a value for.
 5. The **confidence scorer** combines the two (60% LLM, 40% heuristic) and applies the safety rules: under 50 words, LLM unavailable, or signals disagreeing by more than 0.4 → **Uncertain**.
 6. The **label generator** turns the result into a plain-language label: *Likely AI-generated*, *Unclear origin*, or *Likely human-written*.
 7. The result is saved to **SQLite** along with an **audit log** entry holding every score and reason, then returned as JSON with a private `appeal_token`.
