@@ -79,7 +79,7 @@ Contents: Architecture · 1. Detection signals · 2. Uncertainty representation 
  ┌──────────────────────┐
  │ SQLite               │  INSERT appeals (creator_reasoning, evidence)
  │ content + appeals +  │  UPDATE content SET status = under_review
- │ audit_log            │  INSERT audit_log (event=appeal, related_audit_id → original)
+ │ audit_log            │  INSERT audit_log (event=appeal, same content_id as original)
  └────────┬─────────────┘
           │ appeal_id, original label
           ▼
@@ -276,7 +276,7 @@ An appeal must send a `creator_id` matching the submission **and** the matching 
 **What the system does when an appeal arrives** (in one SQLite transaction):
 1. `INSERT` into `appeals`: `appeal_id`, `content_id`, `creator_id`, `creator_reasoning`, `evidence`, `created_at`.
 2. `UPDATE content SET status = 'under_review'`. The label, label text and score are **unchanged**.
-3. `INSERT` an `audit_log` entry: `event_type = 'appeal'`, `related_audit_id` = the original classification entry, and `details` = `{appeal_id, creator_reasoning, evidence, original_attribution, original_confidence}`.
+3. `INSERT` an `audit_log` entry with `event_type = 'appeal'`, the same `content_id` as the original classification, the `appeal_id` and `creator_reasoning`, and the original attribution, confidence and `decided_by` (unchanged).
 4. Respond with the `appeal_id`, the new status and the original label.
 
 There is no automated re-classification.
@@ -392,16 +392,20 @@ Read-only, newest first. Entries are only ever *written* by `/submit` and `/appe
 
 ## 8. Data model (SQLite)
 
+As built in M5 (`audit_log.py`):
+
 ```
-content   (id TEXT PK, creator_id, text, word_count, attribution, label, why, confidence NULL,
-           decided_by, status ['classified'|'under_review'], appeal_token_hash, created_at)
-appeals   (id TEXT PK, content_id FK UNIQUE, creator_id, creator_reasoning, evidence NULL, created_at)
-audit_log (id INTEGER PK, timestamp, event_type ['classification'|'appeal'], content_id FK,
-           related_audit_id NULL,   -- appeal → its original classification entry
-           details JSON)            -- classification: both signal outputs, confidence, attribution,
-                                    --   decided_by, lean, scoring_version
-                                    -- appeal: appeal_id, creator_reasoning, evidence, original_attribution, original score
+content   (content_id PK, creator_id, text, word_count, attribution, confidence NULL, label, why,
+           decided_by, lean, scoring_version, signals JSON,
+           status ['classified'|'under_review'], appeal_token_hash, created_at)
+appeals   (appeal_id PK, content_id UNIQUE, creator_id, creator_reasoning, evidence NULL, created_at)
+audit_log (content_id, creator_id, timestamp, event_type ['classification'|'appeal'],
+           attribution, confidence, llm_score, heuristic_score, decided_by, scoring_version, status,
+           signals JSON,            -- classification only: both full signal outputs
+           appeal_id, creator_reasoning)   -- appeal only
 ```
+
+**Change from the original plan:** the audit log uses flat, queryable columns instead of one `details` JSON blob (only the full signal outputs stay as JSON). An appeal entry links to its original decision through the shared `content_id` and `event_type`, not a `related_audit_id`. The appeal entry also repeats the original attribution, confidence and `decided_by`, so a reviewer reading the log can see exactly what was disputed.
 
 `audit_log` is append-only: the code only ever runs `INSERT` against it. The `UNIQUE` constraint on `appeals.content_id` enforces one appeal per piece of content.
 
@@ -453,7 +457,7 @@ audit_log (id INTEGER PK, timestamp, event_type ['classification'|'appeal'], con
 - **Verify:**
   - **All three label variants are reachable:** unit-test `build_label` with forced scores for each variant and each Uncertain reason, then reach each one end-to-end with real text: an AI sample → high_ai, my own writing → high_human, a 30-word text → uncertain/too_short.
   - **An appeal updates status correctly:**
-    - The right token gives `200`, status `under_review`, and an `appeal` audit entry whose `related_audit_id` points to the classification.
+    - The right token gives `200`, status `under_review`, and an `appeal` audit entry sharing the classification's `content_id`.
     - The item appears in `GET /appeals`.
     - A wrong token gives `403`, and so does the right token with a different `creator_id`, a second appeal gives `409`, appealing a `high_human` result gives `400`, and an unknown id gives `404`.
     - The token never appears in any GET response.
