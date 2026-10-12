@@ -100,6 +100,21 @@ curl -s "http://127.0.0.1:5000/log?content_id=$CONTENT_ID" | python -m json.tool
 - Over the limit, the API returns `429` with a JSON explanation: *"Rate limit exceeded (5 per 1 minute). Each submission runs an AI model, so /submit allows 5 requests per minute and 50 per day per IP. Try again later."*
 - Appeals and GET endpoints are not rate limited. They don't call Groq and are cheap.
 
+**Verified:** rapid requests to a freshly started server:
+
+```bash
+for i in $(seq 1 7); do
+  curl -s -o /dev/null -w "%{http_code} " -X POST http://127.0.0.1:5000/submit \
+    -H "Content-Type: application/json" \
+    -d '{"text": "rate limit test", "creator_id": "ratelimit-test"}'
+done
+# 201 201 201 201 201 429 429
+```
+
+The first 5 are accepted, and every request after that within the minute gets `429` until the window resets. The same burst sent to `/appeal` is never limited. The counter is kept in memory, so restarting the server also resets it.
+
+**Status codes you might see while testing locally:** `000` means curl got no response (the Flask server isn't running). A bare `403` with an empty body means macOS AirPlay answered on port 5000 instead of the app (use `127.0.0.1`, and make sure `python app.py` is running).
+
 ## Testing
 
 **Automated tests:** `python -m unittest discover tests` runs 28 tests, with no Groq calls and no changes to the real database:
