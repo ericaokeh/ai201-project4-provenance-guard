@@ -4,24 +4,30 @@ from datetime import datetime, timezone
 DB_PATH = "audit_log.db"
 
 def init_db():
+    # Defines the columns (name + type), not row values. IF NOT EXISTS makes it
+    # safe to call on every startup, but it won't add columns to an existing
+    # table: delete audit_log.db after changing this schema.
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            "content_id": "3f7a2b1e-...",
-              "creator_id": "test-user-1",
-              "timestamp": "2025-04-01T14:32:10.123Z",
-              "attribution": "likely_ai",
-              "confidence": 0.78,
-              "llm_score": 0.81,
-              "status": "classified"
+            CREATE TABLE IF NOT EXISTS audit_log (
+                content_id  TEXT,
+                creator_id  TEXT,
+                timestamp   TEXT,
+                attribution TEXT,
+                confidence  REAL,
+                llm_score   REAL,
+                status      TEXT
             )
         """)
         conn.commit()
 
 def log_event(entry):
+    # Columns are named explicitly so the INSERT doesn't depend on table column order.
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO audit_log VALUES (:content_id, :creator_id, :timestamp, "
-            ":attribution, :confidence, :status)",
+            "INSERT INTO audit_log (content_id, creator_id, timestamp, attribution, "
+            "confidence, llm_score, status) VALUES (:content_id, :creator_id, "
+            ":timestamp, :attribution, :confidence, :llm_score, :status)",
             {**entry, "timestamp": datetime.now(timezone.utc).isoformat()},
         )
 

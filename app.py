@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from audit_log import init_db, log_event, read_log
+from detection.llm_signal import get_llm_signal
 
 app = Flask(__name__)
 init_db()
@@ -18,20 +19,67 @@ storage_uri="memory://",
 def home():
     return "Provenance Guard is running."
 
+MAX_TEXT_CHARS = 20_000
+MAX_CREATOR_ID_CHARS = 100
+
+# Placeholder labels until M5 adds the full transparency label text.
+PLACEHOLDER_LABELS = {
+    "high_ai": "Likely AI-generated.",
+    "uncertain": "Unclear origin.",
+    "high_human": "Likely human-written.",
+}
+
 @app.route("/submit", methods=["POST"])
 @limiter.limit("5 per minute;50 per day")
 def submit():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object."}), 400
+
     text = data.get("text")
     creator_id = data.get("creator_id")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "'text' is required and cannot be empty."}), 400
+    if len(text) > MAX_TEXT_CHARS:
+        return jsonify({"error": f"'text' must be at most {MAX_TEXT_CHARS:,} characters."}), 400
+    if not isinstance(creator_id, str) or not creator_id.strip():
+        return jsonify({"error": "'creator_id' is required and cannot be empty."}), 400
+    if len(creator_id) > MAX_CREATOR_ID_CHARS:
+        return jsonify({"error": f"'creator_id' must be at most {MAX_CREATOR_ID_CHARS} characters."}), 400
 
-    # Placeholder response — wire in your detection signal next.
-    return jsonify({
-        "content_id": str(uuid.uuid4()),
-        "attribution": "uncertain",
-        "confidence": 0.5,
-        "label": "We're not sure who wrote this.",
+    llm = get_llm_signal(text)
+
+    # Placeholder scoring until M4: confidence is the LLM score alone,
+    # using the planning.md thresholds.
+    confidence = llm["score"]
+    if confidence is None:
+        attribution = "uncertain"
+    elif confidence >= 0.80:
+        attribution = "high_ai"
+    elif confidence <= 0.35:
+        attribution = "high_human"
+    else:
+        attribution = "uncertain"
+
+    content_id = str(uuid.uuid4())
+    log_event({
+        "content_id": content_id,
+        "creator_id": creator_id,
+        "attribution": attribution,
+        "confidence": confidence,
+        "llm_score": llm["score"],
+        "status": "classified",
     })
+
+    return jsonify({
+        "content_id": content_id,
+        "creator_id": creator_id,
+        "attribution": attribution,
+        "confidence": confidence,
+        "label": PLACEHOLDER_LABELS[attribution],
+        "status": "classified",
+        "signals": {"llm": llm},
+    }), 201
 
 @app.route("/appeal", methods=["POST"])
 def appeal():
