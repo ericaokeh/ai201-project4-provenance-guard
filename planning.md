@@ -125,22 +125,33 @@ Contents: Architecture · 1. Detection signals · 2. Uncertainty representation 
 
 ### Signal 2: Stylometric heuristics (local, deterministic)
 
-| Feature | Raw measurement | Sub-score mapping (v1 starting values, linear between) |
-|---|---|---|
-| `em_dash_per_100w` | count of `—` (and ` -- `) per 100 words | 0 → 0.0 · ≥ 1.0 → 1.0 |
-| `contrast_frames_per_100w` | regex hits for "not just X, (but/it's) Y", "it's not X, it's Y", "not this, but that" per 100 words | 0 → 0.0 · ≥ 0.5 → 1.0 |
-| `sentence_length_cv` | coefficient of variation (std/mean) of words per sentence | ≥ 0.60 → 0.0 (bursty, human-like) · ≤ 0.25 → 1.0 (uniform, AI-like) |
+| Sub-score | Weight | Raw measurement | Mapping (v1, linear between) |
+|---|---|---|---|
+| `burstiness` | **0.45** | `sentence_length_cv`: std/mean of words per sentence (line breaks count as sentence ends) | ≥ 0.60 → 0.0 (bursty, human-like) · ≤ 0.25 → 1.0 (uniform, AI-like) |
+| `vocabulary` | **0.35** | `mattr`: moving-average type-token ratio, 50-word window (stable across text lengths, unlike plain TTR) | ≤ 0.80 → 0.0 · ≥ 0.92 → 1.0 (**varied vocabulary leans AI**) |
+| `em_dash` | **0.10** | `em_dash_per_100w`: `—`, ` -- `, ` – ` per 100 words | 0 → 0.0 · ≥ 1.0 → 1.0 |
+| `contrast_frames` | **0.10** | `contrast_frames_per_100w`: sentences containing "not just X, but/it's Y", "it's not X, it's Y", "it isn't X — it's Y", "not a X, but a Y" (each sentence counted once) | 0 → 0.0 · ≥ 0.5 → 1.0 |
 
-Heuristic `score` = the plain average of the three sub-scores.
+Heuristic `score` = the weighted sum of the sub-scores. A feature that can't be measured (fewer than 3 sentences, or no words) gets a neutral 0.5.
+
+**Why these weights.** Burstiness and vocabulary are *dense*: every text has a value. Em dashes and contrast frames are *sparse*: most text of either kind has none, so a zero is weak evidence. With the original plain average, a typical AI paragraph with no em dashes scored about 0.33, which triggered "signals disagree" against a confident LLM. Sparse features now only nudge the score.
+
+**What testing changed (2026-10-11, 18 samples: 10 Gatsby/Twain paragraphs vs 8 gpt-oss-120b paragraphs; 17 usable):**
+- **Vocabulary direction was flipped.** I first assumed AI text repeats words. The data showed the opposite: AI MATTR 0.85–0.93, human 0.61–0.85. Polished AI prose uses more varied vocabulary.
+- **Em dashes point toward *human* in this sample.** Fitzgerald used 1.6–2.1 per 100 words, while only 2 of 8 AI samples used any. That's why the weight dropped to 0.10.
+- **Contrast frames fired on 0 of 18 samples.**
+- **Result:** heuristic mean is 0.29 for human vs 0.68 for AI (+0.39), up from 0.30 vs 0.34 (+0.04) before the fix. No sample's signals disagreed by more than 0.40.
+- **Caveat:** the sample is small, and the human side is 100-year-old literary prose. The M4 calibration with modern human writing (including mine) sets the final values.
 
 - **Measures:** countable surface habits, independent of meaning.
-- **Why it differs:** current chat models overuse em dashes and the "it's not X, it's Y" move, and they write sentences of very even length. Humans write in bursts.
-- **Blind spots:** many humans love em dashes. Deleting them defeats the signal. It's meaningless on short text, it's English-only, and it's tuned to today's AI style habits.
+- **Why it differs:** AI text has very even sentence lengths and polished, varied word choice, and it sometimes overuses em dashes and "it's not X, it's Y." Humans write in bursts and repeat everyday words.
+- **Blind spots:** many humans love em dashes (Fitzgerald did). Varied vocabulary also describes skilled human writers. Deleting em dashes or varying sentence length defeats it. It's meaningless on short text, it's English-only, and it's tuned to today's AI style habits.
 - **Output:**
   ```python
-  {"score": 0.71,
-   "features":   {"em_dash_per_100w": 1.4, "contrast_frames_per_100w": 0.25, "sentence_length_cv": 0.31},
-   "sub_scores": {"em_dash": 1.0, "contrast_frames": 0.5, "burstiness": 0.83}}
+  {"score": 0.64,
+   "features":   {"em_dash_per_100w": 0.0, "contrast_frames_per_100w": 0.0,
+                  "sentence_length_cv": 0.31, "mattr": 0.89, "word_count": 182},
+   "sub_scores": {"em_dash": 0.0, "contrast_frames": 0.0, "burstiness": 0.83, "vocabulary": 0.75}}
   ```
 
 ### Combining them
@@ -342,8 +353,8 @@ Response `201`:
   "scoring_version": "v1",
   "signals": {
     "llm":       { "score": 0.85, "reasons": ["…"], "model": "openai/gpt-oss-120b", "available": true },
-    "heuristic": { "score": 0.82, "features": { "em_dash_per_100w": 1.5, "contrast_frames_per_100w": 0.25, "sentence_length_cv": 0.31 },
-                   "sub_scores": { "em_dash": 1.0, "contrast_frames": 0.5, "burstiness": 0.83 } }
+    "heuristic": { "score": 0.82, "features": { "em_dash_per_100w": 1.5, "contrast_frames_per_100w": 0.25, "sentence_length_cv": 0.31, "mattr": 0.902, "word_count": 412 },
+                   "sub_scores": { "burstiness": 0.83, "vocabulary": 0.85, "em_dash": 1.0, "contrast_frames": 0.5 } }
   },
   "word_count": 412,
   "created_at": "ISO-8601"
@@ -423,7 +434,7 @@ audit_log (id INTEGER PK, timestamp, event_type ['classification'|'appeal'], con
 
 - **Provide:** Architecture · §1 (both signals and "Combining them") · §2 (in full: the meaning of the score, the threshold diagram, the ordered rules table, calibration).
 - **Ask for:**
-  1. `detection/heuristic_signal.py` with `get_heuristic_signal(text) -> dict` (the three features, line breaks treated as sentence boundaries, linear sub-score mappings).
+  1. `detection/heuristic_signal.py` with `get_heuristic_signal(text) -> dict` (the four weighted features, line breaks treated as sentence boundaries, linear sub-score mappings).
   2. `scoring.py` with `SCORING_CONFIG` and `score(llm, heuristic, word_count) -> {confidence, attribution, decided_by, lean}`, implementing the six rules **in order**.
   3. Unit tests for both.
 - **Verify:**
