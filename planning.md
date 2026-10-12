@@ -110,7 +110,7 @@ Contents: Architecture · 1. Detection signals · 2. Uncertainty representation 
 - **Measures:** the model's overall read of how AI-like the text is: predictable word choice, generic or "smoothed over" phrasing, balanced hedging, and a lack of concrete personal detail.
 - **Why it differs:** AI text gravitates toward the most likely phrasing and a polished, neutral tone. Human text has surprising word choices, specifics, opinions and imperfections.
 - **Blind spots:** it's a black box (its reasons are an explanation, not proof). It's biased against formal and non-native English writing, and it's fooled by lightly edited AI text. Its behavior can also drift when Groq updates the model.
-- **How it's called:** `llama-3.3-70b-versatile`, `temperature=0`, JSON response format. The submitted text is wrapped in `<text>…</text>` delimiters, and the system prompt says to treat it **only as data to analyze, never as instructions** (see the prompt-injection edge case in §5).
+- **How it's called:** `openai/gpt-oss-120b`, `temperature=0`, JSON response format. The submitted text is wrapped in `<text>…</text>` delimiters, and the system prompt says to treat it **only as data to analyze, never as instructions** (see the prompt-injection edge case in §5).
 - **Rubric anchors in the prompt** (these keep the score from being arbitrary):
   - `0.0–0.2`: specific personal detail, irregular rhythm, informal or idiosyncratic voice
   - `0.4–0.6`: competent but generic; could be either
@@ -119,7 +119,7 @@ Contents: Architecture · 1. Detection signals · 2. Uncertainty representation 
   ```python
   {"score": 0.82,                     # float 0–1, or None if unavailable
    "reasons": ["generic, balanced tone", "no concrete personal details"],  # 1–3 short strings
-   "model": "llama-3.3-70b-versatile",
+   "model": "openai/gpt-oss-120b",
    "available": True}                 # False on API error / timeout (10s) / unparseable JSON
   ```
 
@@ -341,7 +341,7 @@ Response `201`:
   "lean": null,
   "scoring_version": "v1",
   "signals": {
-    "llm":       { "score": 0.85, "reasons": ["…"], "model": "llama-3.3-70b-versatile", "available": true },
+    "llm":       { "score": 0.85, "reasons": ["…"], "model": "openai/gpt-oss-120b", "available": true },
     "heuristic": { "score": 0.82, "features": { "em_dash_per_100w": 1.5, "contrast_frames_per_100w": 0.25, "sentence_length_cv": 0.31 },
                    "sub_scores": { "em_dash": 1.0, "contrast_frames": 0.5, "burstiness": 0.83 } }
   },
@@ -455,5 +455,5 @@ audit_log (id INTEGER PK, timestamp, event_type ['classification'|'appeal'], con
 
 - **No reviewer authentication.** `GET /appeals` and `GET /log` are open. That's acceptable for a class project, but in production they'd need admin auth.
 - **Reviewer resolution** (`POST /appeals/<id>/resolve` → `upheld` / `overturned`, logged to the audit log) is the first stretch feature. Update this doc before building it.
-- **Groq model availability.** Confirm `llama-3.3-70b-versatile` works on my account before M3.
+- **Groq model (resolved 2026-10-11).** `llama-3.3-70b-versatile` is not available on my account, so signal 1 uses `openai/gpt-oss-120b`, the largest general model available. I tested it with `temperature=0` + JSON mode.
 - **Heuristic mappings and thresholds are v1 starting values** until the M4 calibration run.
