@@ -100,18 +100,34 @@ curl -s "http://127.0.0.1:5000/log?content_id=$CONTENT_ID" | python -m json.tool
 - Over the limit, the API returns `429` with a JSON explanation: *"Rate limit exceeded (5 per 1 minute). Each submission runs an AI model, so /submit allows 5 requests per minute and 50 per day per IP. Try again later."*
 - Appeals and GET endpoints are not rate limited. They don't call Groq and are cheap.
 
-**Verified:** rapid requests to a freshly started server:
+**Verified:** 12 rapid requests to a freshly started server (the course's test command, using `127.0.0.1` because of the macOS note below):
 
 ```bash
-for i in $(seq 1 7); do
-  curl -s -o /dev/null -w "%{http_code} " -X POST http://127.0.0.1:5000/submit \
+for i in $(seq 1 12); do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:5000/submit \
     -H "Content-Type: application/json" \
-    -d '{"text": "rate limit test", "creator_id": "ratelimit-test"}'
+    -d '{"text": "This is a test submission for rate limit testing purposes only.", "creator_id": "ratelimit-test"}'
 done
-# 201 201 201 201 201 429 429
 ```
 
-The first 5 are accepted, and every request after that within the minute gets `429` until the window resets. The same burst sent to `/appeal` is never limited. The counter is kept in memory, so restarting the server also resets it.
+Output:
+
+```
+200
+200
+200
+200
+200
+429
+429
+429
+429
+429
+429
+429
+```
+
+The first 5 are accepted. Requests 6–12 get `429` because the 5-per-minute limit is used up, and each 429 is returned before any detection runs, so no Groq calls are spent. The same burst sent to `/appeal` is never limited. The counter is kept in memory, so restarting the server also resets it.
 
 **Status codes you might see while testing locally:** `000` means curl got no response (the Flask server isn't running). A bare `403` with an empty body means macOS AirPlay answered on port 5000 instead of the app (use `127.0.0.1`, and make sure `python app.py` is running).
 
@@ -177,6 +193,7 @@ Below are four real entries from a live run (`GET /log`, shown oldest first). Ea
   "decided_by": "threshold_high_ai",
   "scoring_version": "v1",
   "status": "classified",
+  "appeal_filed": true,
   "signals": {
     "llm": {
       "score": 0.92,
@@ -206,6 +223,7 @@ Below are four real entries from a live run (`GET /log`, shown oldest first). Ea
   "decided_by": "threshold_high_human",
   "scoring_version": "v1",
   "status": "classified",
+  "appeal_filed": false,
   "signals": {
     "llm": {
       "score": 0.15,
@@ -235,6 +253,7 @@ Below are four real entries from a live run (`GET /log`, shown oldest first). Ea
   "decided_by": "too_short",
   "scoring_version": "v1",
   "status": "classified",
+  "appeal_filed": false,
   "signals": {
     "llm": {
       "score": 0.45,
@@ -262,6 +281,7 @@ Below are four real entries from a live run (`GET /log`, shown oldest first). Ea
   "decided_by": "threshold_high_ai",
   "scoring_version": "v1",
   "status": "under_review",
+  "appeal_filed": true,
   "appeal_id": "dd2fce37-962d-4969-beab-1adfa04df2ec",
   "creator_reasoning": "I wrote this product copy myself for my shop; earlier drafts are in my Google Docs history."
 }
@@ -270,6 +290,7 @@ Below are four real entries from a live run (`GET /log`, shown oldest first). Ea
 **How to read these:**
 - Entry 4 shares entry 1's `content_id`, so the appeal sits alongside the decision it disputes, and it repeats that decision unchanged (`high_ai`, 0.86, `threshold_high_ai`).
 - Entry 1 still says `"status": "classified"`. The log records what was true at each moment, while `GET /content/<id>` shows the current status (`under_review`).
+- **`appeal_filed`** shows on every entry whether that submission has been appealed: `true` for entries 1 and 4, `false` for 2 and 3. It's worked out when the log is read (by checking the `appeals` table), so stored rows are never edited.
 - `decided_by` names the exact rule behind each label, and `scoring_version` records which weights and thresholds were in force, so old entries stay explainable after future tuning.
 
 ## Setup

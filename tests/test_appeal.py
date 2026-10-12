@@ -41,7 +41,7 @@ def submit(text, creator_id="writer-1", llm_score=0.9):
     with mock.patch.object(app, "get_llm_signal", return_value=llm_stub), \
          mock.patch.object(app, "get_heuristic_signal", side_effect=heuristic_stub):
         response = client.post("/submit", json={"text": text, "creator_id": creator_id})
-    assert response.status_code == 201, response.get_json()
+    assert response.status_code == 200, response.get_json()
     return response.get_json()
 
 
@@ -80,6 +80,8 @@ class AppealTests(unittest.TestCase):
         self.assertIn("drafts are in Google Docs", appeal_entry["creator_reasoning"])
         self.assertEqual(classification["status"], "classified")  # log row never rewritten
         self.assertEqual(classification["signals"]["llm"]["score"], 0.9)
+        self.assertTrue(classification["appeal_filed"])  # computed at read time
+        self.assertTrue(appeal_entry["appeal_filed"])
 
         queue = client.get("/appeals").get_json()["appeals"]
         item = next(a for a in queue if a["appeal_id"] == body["appeal_id"])
@@ -104,6 +106,8 @@ class AppealTests(unittest.TestCase):
         sub = submit(HUMAN_TEXT, llm_score=0.05)
         self.assertEqual(sub["attribution"], "high_human")
         self.assertEqual(appeal(sub).status_code, 400)
+        entries = client.get(f"/log?content_id={sub['content_id']}").get_json()["entries"]
+        self.assertEqual([e["appeal_filed"] for e in entries], [False])
 
     def test_uncertain_can_be_appealed(self):
         sub = submit("Too short to judge, but I wrote it.", llm_score=0.9)

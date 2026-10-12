@@ -180,12 +180,21 @@ def appeal_queue(status="under_review"):
 
 
 def read_log(limit=20, content_id=None):
-    query, params = "SELECT * FROM audit_log", []
+    # appeal_filed is computed at read time from the appeals table, so every entry
+    # shows whether its content has been appealed without stored rows ever being edited.
+    query = """
+        SELECT l.*, EXISTS (SELECT 1 FROM appeals a WHERE a.content_id = l.content_id) AS appeal_filed
+        FROM audit_log l
+    """
+    params = []
     if content_id:
-        query += " WHERE content_id = ?"
+        query += " WHERE l.content_id = ?"
         params.append(content_id)
-    query += " ORDER BY timestamp DESC LIMIT ?"
+    query += " ORDER BY l.timestamp DESC LIMIT ?"
     params.append(limit)
     with _connect() as conn:
         rows = conn.execute(query, params).fetchall()
-    return [_to_dict(row) for row in rows]
+    entries = [_to_dict(row) for row in rows]
+    for entry in entries:
+        entry["appeal_filed"] = bool(entry["appeal_filed"])
+    return entries

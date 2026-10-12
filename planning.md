@@ -337,7 +337,7 @@ Why these limits: 5/min covers a writer re-checking a few drafts but blocks scri
 
 Request: `{ "text": "1–20,000 characters", "creator_id": "1–100 characters" }`
 
-Response `201`:
+Response `200`:
 ```json
 {
   "content_id": "uuid",
@@ -361,7 +361,7 @@ Response `201`:
 }
 ```
 
-Errors: `400` empty / >20,000 chars / non-JSON · `429` over the rate limit. A Groq failure is **not** an error: the response is `201` with `label: uncertain` and `decided_by: llm_unavailable`.
+Errors: `400` empty / >20,000 chars / non-JSON · `429` over the rate limit. A Groq failure is **not** an error: the response is `200` with `attribution: uncertain` and `decided_by: llm_unavailable`.
 
 ### `POST /appeal`
 

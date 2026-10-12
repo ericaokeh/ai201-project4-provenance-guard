@@ -127,7 +127,7 @@ def submit():
         "word_count": word_count,
         "signals": signals,
         "created_at": created_at,
-    }), 201
+    }), 200
 
 
 @app.route("/appeal", methods=["POST"])
