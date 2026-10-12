@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 import audit_log
+from labels import UNDER_REVIEW_SUFFIX
 
 AI_TEXT = " ".join(["Organizations can unlock unprecedented value through collaboration."] * 12)
 HUMAN_TEXT = " ".join(["ok so my cat sat in the plumber's toolbox again lol, he was not thrilled."] * 6)
@@ -69,7 +70,7 @@ class AppealTests(unittest.TestCase):
         content = client.get(f"/content/{sub['content_id']}").get_json()
         self.assertEqual(content["status"], "under_review")
         self.assertEqual(content["attribution"], "high_ai")  # original label unchanged
-        self.assertTrue(content["label"].endswith(app.UNDER_REVIEW_SUFFIX))
+        self.assertTrue(content["label"].endswith(UNDER_REVIEW_SUFFIX))
         self.assertEqual(content["appeal"]["appeal_id"], body["appeal_id"])
 
         entries = client.get(f"/log?content_id={sub['content_id']}").get_json()["entries"]
@@ -133,6 +134,70 @@ class AppealTests(unittest.TestCase):
             body = client.get(path).get_data(as_text=True)
             self.assertNotIn(sub["appeal_token"], body)
             self.assertNotIn("appeal_token_hash", body)
+
+
+def resolve(appeal_id, **overrides):
+    body = {"decision": "overturned", "reviewer_id": "reviewer-1",
+            "reviewer_notes": "Drafts in version history confirm the creator wrote it.", **overrides}
+    return client.post(f"/appeals/{appeal_id}/resolve", json=body)
+
+
+class ResolveTests(unittest.TestCase):
+    def appealed(self):
+        sub = submit(AI_TEXT)
+        return sub, appeal(sub).get_json()["appeal_id"]
+
+    def test_overturned_relabels_and_logs(self):
+        sub, appeal_id = self.appealed()
+        response = resolve(appeal_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "appeal_overturned")
+
+        content = client.get(f"/content/{sub['content_id']}").get_json()
+        self.assertEqual(content["status"], "appeal_overturned")
+        self.assertEqual(content["attribution"], "high_ai")  # original decision kept
+        self.assertTrue(content["label"].startswith("Human-written (confirmed on review)."))
+        self.assertIn('"Likely AI-generated"', content["label"])
+        self.assertEqual(content["appeal"]["decision"], "overturned")
+
+        entries = client.get(f"/log?content_id={sub['content_id']}").get_json()["entries"]
+        self.assertEqual([e["event_type"] for e in entries], ["appeal_resolved", "appeal", "classification"])
+        resolved = entries[0]
+        self.assertEqual((resolved["decision"], resolved["reviewer_id"], resolved["status"]),
+                         ("overturned", "reviewer-1", "appeal_overturned"))
+        self.assertEqual(resolved["attribution"], "high_ai")
+        self.assertEqual([e["status"] for e in entries[1:]], ["under_review", "classified"])  # never rewritten
+
+    def test_upheld_keeps_label_with_suffix(self):
+        sub, appeal_id = self.appealed()
+        self.assertEqual(resolve(appeal_id, decision="upheld").status_code, 200)
+        content = client.get(f"/content/{sub['content_id']}").get_json()
+        self.assertEqual(content["status"], "appeal_upheld")
+        self.assertTrue(content["label"].startswith("Likely AI-generated."))
+        self.assertTrue(content["label"].endswith("A person reviewed the creator's appeal and kept this label."))
+
+    def test_resolved_leaves_queue_and_appears_under_its_status(self):
+        _, appeal_id = self.appealed()
+        resolve(appeal_id, decision="upheld")
+        pending = [a["appeal_id"] for a in client.get("/appeals").get_json()["appeals"]]
+        upheld = client.get("/appeals?status=appeal_upheld").get_json()["appeals"]
+        self.assertNotIn(appeal_id, pending)
+        item = next(a for a in upheld if a["appeal_id"] == appeal_id)
+        self.assertEqual((item["decision"], item["reviewer_id"]), ("upheld", "reviewer-1"))
+
+    def test_second_resolution_is_409_and_reappeal_is_409(self):
+        sub, appeal_id = self.appealed()
+        self.assertEqual(resolve(appeal_id).status_code, 200)
+        self.assertEqual(resolve(appeal_id, decision="upheld").status_code, 409)
+        self.assertEqual(appeal(sub).status_code, 409)
+
+    def test_resolve_errors(self):
+        _, appeal_id = self.appealed()
+        self.assertEqual(resolve("no-such-appeal").status_code, 404)
+        self.assertEqual(resolve(appeal_id, decision="maybe").status_code, 400)
+        self.assertEqual(resolve(appeal_id, reviewer_notes="ok").status_code, 400)
+        self.assertEqual(resolve(appeal_id, reviewer_id="").status_code, 400)
+        self.assertEqual(client.get("/appeals?status=classified").status_code, 400)
 
 
 if __name__ == "__main__":

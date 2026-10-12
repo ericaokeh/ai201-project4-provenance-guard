@@ -33,6 +33,11 @@ UNCERTAIN_REASONS = {
 }
 
 UNDER_REVIEW_SUFFIX = "The creator has disputed this label. It is waiting for review by a person."
+UPHELD_SUFFIX = "A person reviewed the creator's appeal and kept this label."
+OVERTURNED_LABEL = (
+    "Human-written (confirmed on review). Our automated checks originally labeled this "
+    "\"{headline}\", but a person reviewed the creator's appeal and overturned that result."
+)
 
 # Plain-language phrases for heuristic sub-scores that point clearly one way.
 AI_SIDE_PHRASES = {
@@ -88,6 +93,17 @@ def _why(result: dict[str, Any], llm: dict[str, Any], heuristic: dict[str, Any])
         reason = llm["reasons"][0].rstrip(".")
         parts.append(f"The language model noted: {reason[0].lower() + reason[1:]}.")
     return " ".join(parts) or "No single feature stood out; the result comes from the overall balance of signals."
+
+
+def display_label(label: str, status: str) -> str:
+    """The label a reader sees now, given the original label text and the appeal status."""
+    if status == "under_review":
+        return f"{label} {UNDER_REVIEW_SUFFIX}"
+    if status == "appeal_upheld":
+        return f"{label} {UPHELD_SUFFIX}"
+    if status == "appeal_overturned":
+        return OVERTURNED_LABEL.format(headline=label.split(".")[0])
+    return label
 
 
 def build_label(result: dict[str, Any], llm: dict[str, Any], heuristic: dict[str, Any]) -> dict[str, str]:
