@@ -3,7 +3,9 @@ from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from audit_log import init_db, log_event, read_log
+from detection.heuristic_signal import get_heuristic_signal
 from detection.llm_signal import get_llm_signal
+from scoring import score
 
 app = Flask(__name__)
 init_db()
@@ -48,37 +50,34 @@ def submit():
         return jsonify({"error": f"'creator_id' must be at most {MAX_CREATOR_ID_CHARS} characters."}), 400
 
     llm = get_llm_signal(text)
-
-    # Placeholder scoring until M4: confidence is the LLM score alone,
-    # using the planning.md thresholds.
-    confidence = llm["score"]
-    if confidence is None:
-        attribution = "uncertain"
-    elif confidence >= 0.80:
-        attribution = "high_ai"
-    elif confidence <= 0.35:
-        attribution = "high_human"
-    else:
-        attribution = "uncertain"
+    heuristic = get_heuristic_signal(text)
+    result = score(llm, heuristic, heuristic["features"]["word_count"])
 
     content_id = str(uuid.uuid4())
     log_event({
         "content_id": content_id,
         "creator_id": creator_id,
-        "attribution": attribution,
-        "confidence": confidence,
+        "attribution": result["attribution"],
+        "confidence": result["confidence"],
         "llm_score": llm["score"],
+        "heuristic_score": heuristic["score"],
+        "decided_by": result["decided_by"],
+        "scoring_version": result["scoring_version"],
         "status": "classified",
     })
 
     return jsonify({
         "content_id": content_id,
         "creator_id": creator_id,
-        "attribution": attribution,
-        "confidence": confidence,
-        "label": PLACEHOLDER_LABELS[attribution],
+        "attribution": result["attribution"],
+        "confidence": result["confidence"],
+        "label": PLACEHOLDER_LABELS[result["attribution"]],
+        "decided_by": result["decided_by"],
+        "lean": result["lean"],
+        "scoring_version": result["scoring_version"],
         "status": "classified",
-        "signals": {"llm": llm},
+        "word_count": heuristic["features"]["word_count"],
+        "signals": {"llm": llm, "heuristic": heuristic},
     }), 201
 
 @app.route("/appeal", methods=["POST"])
