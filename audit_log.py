@@ -28,8 +28,11 @@ AUDIT_COLUMNS = {
     "scoring_version": "TEXT",
     "status": "TEXT",
     "signals": "TEXT",             # JSON: both full signal outputs (classification only)
-    "appeal_id": "TEXT",           # appeal only
+    "appeal_id": "TEXT",           # appeal and appeal_resolved
     "creator_reasoning": "TEXT",   # appeal only
+    "decision": "TEXT",            # appeal_resolved only: 'upheld' or 'overturned'
+    "reviewer_id": "TEXT",         # appeal_resolved only
+    "reviewer_notes": "TEXT",      # appeal_resolved only
 }
 
 CONTENT_COLUMNS = {
@@ -57,6 +60,10 @@ APPEAL_COLUMNS = {
     "creator_reasoning": "TEXT",
     "evidence": "TEXT",
     "created_at": "TEXT",
+    "decision": "TEXT",            # set when a reviewer resolves it
+    "reviewer_id": "TEXT",
+    "reviewer_notes": "TEXT",
+    "resolved_at": "TEXT",
 }
 
 JSON_FIELDS = ("signals",)
@@ -162,12 +169,50 @@ def record_appeal(appeal, audit_entry):
     return True
 
 
+def get_appeal(appeal_id):
+    """An appeal plus the content fields a resolution needs, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT a.*, c.status, c.attribution, c.confidence, c.decided_by, c.scoring_version
+            FROM appeals a JOIN content c ON c.content_id = a.content_id
+            WHERE a.appeal_id = ?
+            """,
+            (appeal_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def resolve_appeal(appeal_id, content_id, new_status, resolution, audit_entry):
+    """Record a reviewer's decision, move the content out of under_review, and log it,
+    all in one transaction.
+
+    Returns False (and changes nothing) if the content is no longer under_review,
+    e.g. another reviewer resolved it first.
+    """
+    with _connect() as conn:
+        updated = conn.execute(
+            "UPDATE content SET status = ? WHERE content_id = ? AND status = 'under_review'",
+            (new_status, content_id),
+        ).rowcount
+        if updated == 0:
+            return False
+        conn.execute(
+            "UPDATE appeals SET decision = :decision, reviewer_id = :reviewer_id, "
+            "reviewer_notes = :reviewer_notes, resolved_at = :resolved_at WHERE appeal_id = :appeal_id",
+            {**resolution, "appeal_id": appeal_id},
+        )
+        _insert(conn, "audit_log", AUDIT_COLUMNS, {**audit_entry, "timestamp": now()})
+    return True
+
+
 def appeal_queue(status="under_review"):
     """Appeals whose content has the given status, oldest first, with everything a reviewer needs."""
     with _connect() as conn:
         rows = conn.execute(
             """
             SELECT a.appeal_id, a.created_at AS filed_at, a.creator_id, a.creator_reasoning, a.evidence,
+                   a.decision, a.reviewer_id, a.reviewer_notes, a.resolved_at,
                    c.content_id, c.text, c.word_count, c.attribution, c.confidence, c.label, c.why,
                    c.decided_by, c.lean, c.scoring_version, c.signals, c.status, c.created_at AS submitted_at
             FROM appeals a JOIN content c ON c.content_id = a.content_id

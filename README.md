@@ -4,7 +4,7 @@ Provenance Guard is a Flask API that estimates whether a piece of text was writt
 
 The guiding principle: **wrongly calling a human writer's work "AI-generated" is the worst mistake this system can make.** Most of the design decisions below (asymmetric thresholds, a disagreement rule, a minimum length, labels that say "estimate, not proof," and an appeal path) exist to make that mistake rare and fixable.
 
-**Walkthrough video:** _[link to be added]_ · **Design spec:** [planning.md](planning.md) · **Run it:** [Setup](#setup)
+**Walkthrough video:** https://drive.google.com/file/d/1nMHboYaGrTQCYNt6MSdZBphzVScwLt7I/view?usp=sharing · **Design spec:** [planning.md](planning.md) · **Run it:** [Setup](#setup)
 
 **Contents:** [How it works](#how-a-submission-flows-through-the-system) · [Endpoints](#endpoints) · [Detection signals](#detection-signals) · [Confidence scoring](#confidence-scoring) · [Transparency labels](#transparency-labels) · [Appeals](#appeals) · [Rate limiting](#rate-limiting) · [Testing](#testing) · [Audit log](#audit-log-examples) · [Setup](#setup) · [Known limitations](#known-limitations) · [If I deployed this for real](#if-i-deployed-this-for-real) · [Spec reflection](#spec-reflection) · [AI usage](#ai-usage)
 
@@ -36,6 +36,7 @@ POST /appeal ─► validator ─► verify creator_id + token ─► status →
 | GET | `/content/<id>` | Current label and status of a submission |
 | GET | `/appeals` | Reviewer queue of pending appeals (`?status=under_review`) |
 | GET | `/log` | Read-only audit log entries (optionally `?content_id=`) |
+| POST | `/appeals/<appeal_id>/resolve` | **Stretch:** a reviewer upholds or overturns an appeal |
 
 ## Detection signals
 
@@ -167,6 +168,27 @@ curl -s "http://127.0.0.1:5000/log?content_id=$CONTENT_ID" | python -m json.tool
 - **What happens:** in one database transaction, the appeal is stored, the content's status changes from `classified` to `under_review`, and an `appeal` entry is appended to the audit log with the creator's reasoning and the original decision. **The original label is not changed or hidden**, and nothing is automatically re-classified.
 - **Reviewer queue:** `GET /appeals` lists pending appeals oldest first. Each item has the full submitted text, the original label and score, both signals' full output, and the creator's reasoning and evidence: everything a person needs to decide without digging through the log.
 
+### Stretch: a reviewer resolves the appeal
+
+The labels promise that "a person will review it," and this endpoint is how that review gets recorded:
+
+```json
+POST /appeals/<appeal_id>/resolve
+{ "decision": "upheld | overturned", "reviewer_id": "reviewer-1",
+  "reviewer_notes": "Required, 10–2,000 chars: why the reviewer decided this way." }
+```
+
+| Decision | Content status | What a reader sees on `GET /content/<id>` |
+|---|---|---|
+| `upheld` | `appeal_upheld` | the original label, plus *"A person reviewed the creator's appeal and kept this label."* |
+| `overturned` | `appeal_overturned` | *"Human-written (confirmed on review). Our automated checks originally labeled this "Likely AI-generated", but a person reviewed the creator's appeal and overturned that result."* |
+
+- **The original `attribution` and `confidence` are never edited.** They remain the record of what the automated system decided. The review sits alongside them, and an `appeal_resolved` entry is appended to the audit log.
+- **Reviewer notes are required,** so every resolution can be explained later. Over time, overturned appeals are exactly the labeled examples needed to recalibrate the signals.
+- **Overturned means "human-written," not "uncertain,"** because an appeal is the creator saying "I wrote this," and overturning it agrees with them.
+- **Errors:** `400` invalid decision or missing notes, `404` unknown appeal, `409` already resolved. A creator also can't appeal again after a resolution (`409`).
+- Resolved appeals leave the pending queue and can be listed with `GET /appeals?status=appeal_upheld` or `?status=appeal_overturned`.
+
 ## Rate limiting
 
 `POST /submit` is limited to **5 requests per minute and 50 per day per IP**.
@@ -209,7 +231,7 @@ The first 5 are accepted. Requests 6–12 get `429` because the 5-per-minute lim
 
 ## Testing
 
-**Automated tests:** `python -m unittest discover tests` runs 28 tests, with no Groq calls and no changes to the real database:
+**Automated tests:** `python -m unittest discover tests` runs 33 tests, with no Groq calls and no changes to the real database:
 - **13 scoring tests:** every rule and threshold boundary (49 vs 50 words, a signal gap of exactly 0.40 vs 0.41, confidence of exactly 0.80 / 0.79 / 0.35 / 0.36).
 - **7 label tests:** all three variants and every Uncertain reason. The label text was also checked character-for-character against planning.md §3.
 - **8 appeal tests** (temp database, stubbed LLM):
@@ -220,6 +242,12 @@ The first 5 are accepted. Requests 6–12 get `429` because the 5-per-minute lim
   - an unknown id gets 404
   - input validation works
   - the token never appears in any GET response
+- **5 resolution tests (stretch):**
+  - overturning relabels the content as human-written while keeping the original attribution, and appends an `appeal_resolved` entry without rewriting earlier entries
+  - upholding keeps the label and adds the review note
+  - resolved appeals leave the pending queue
+  - a second resolution gets 409, and so does a second appeal
+  - bad input gets 400, and an unknown appeal gets 404
 
 ### Course test inputs (scoring v1)
 
@@ -253,7 +281,7 @@ The first 5 are accepted. Requests 6–12 get `429` because the 5-per-minute lim
 
 Every classification and every appeal appends one entry to the `audit_log` table in SQLite. Entries are never updated or deleted, so the log is a complete history. A submission's current status lives in a separate `content` table. Read the log with `GET /log` (newest first; `?content_id=` filters to one submission, `?limit=` up to 200).
 
-Below are four real entries from a live run (`GET /log`, shown oldest first). Each classification's `signals` field holds both signals' full output. The heuristic's raw feature values are trimmed here for length.
+Below are five real entries from live runs (`GET /log`, shown oldest first). Each classification's `signals` field holds both signals' full output. The heuristic's raw feature values are trimmed here for length.
 
 **1. Classification: AI product copy → `high_ai`**
 ```json
@@ -367,6 +395,28 @@ Below are four real entries from a live run (`GET /log`, shown oldest first). Ea
 - Entry 4 shares entry 1's `content_id`, so the appeal sits alongside the decision it disputes, and it repeats that decision unchanged (`high_ai`, 0.86, `threshold_high_ai`).
 - Entry 1 still says `"status": "classified"`. The log records what was true at each moment, while `GET /content/<id>` shows the current status (`under_review`).
 - **`appeal_filed`** shows on every entry whether that submission has been appealed: `true` for entries 1 and 4, `false` for 2 and 3. It's worked out when the log is read (by checking the `appeals` table), so stored rows are never edited.
+
+**5. Stretch: a reviewer resolves the appeal from entry 4**
+```json
+{
+  "content_id": "29e18d15-fe75-40c9-8a1a-014dc266e8b1",
+  "creator_id": "demo-writer-ai",
+  "timestamp": "2026-10-12T15:06:19.961769+00:00",
+  "event_type": "appeal_resolved",
+  "attribution": "high_ai",
+  "confidence": 0.86,
+  "decided_by": "threshold_high_ai",
+  "scoring_version": "v1",
+  "status": "appeal_upheld",
+  "appeal_filed": true,
+  "appeal_id": "dd2fce37-962d-4969-beab-1adfa04df2ec",
+  "decision": "upheld",
+  "reviewer_id": "reviewer-erica",
+  "reviewer_notes": "The 'drafts' were not provided and the text matches generated marketing copy closely; keeping the AI label."
+}
+```
+
+Together, entries 1, 4 and 5 are the complete life of one submission: the automated decision, the creator's dispute, and a person's final ruling with their reasoning. Each was appended separately, and none was edited afterwards.
 - `decided_by` names the exact rule behind each label, and `scoring_version` records which weights and thresholds were in force, so old entries stay explainable after future tuning.
 
 ## Setup
@@ -411,7 +461,7 @@ Each limitation below follows from a specific property of the signals:
 3. **Real accounts and reviewer tools.**
    - Creators log in instead of keeping an `appeal_token`.
    - `GET /appeals` and `GET /log` require reviewer authentication. They're open here only so graders can see them.
-   - Reviewers get a resolve endpoint to uphold or overturn a label, logged to the audit trail. Overturned appeals become labeled data for recalibrating the signals.
+   - Only authenticated reviewers can use the resolve endpoint (it's built, but open here). Overturned appeals feed into a regular recalibration of the signals.
 
 ## Spec reflection
 

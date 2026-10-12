@@ -281,7 +281,7 @@ An appeal must send a `creator_id` matching the submission **and** the matching 
 
 There is no automated re-classification.
 
-**Status values:** `classified` → `under_review`. Reviewer resolution (`upheld` / `overturned`) is a stretch goal.
+**Status values:** `classified` → `under_review` → `appeal_upheld` or `appeal_overturned` (reviewer resolution; see "Stretch: reviewer resolves an appeal").
 
 **What a reviewer sees:** `GET /appeals?status=under_review` returns the queue **oldest first**. Each item has everything needed to judge it without digging through the log:
 
@@ -466,9 +466,35 @@ audit_log (content_id, creator_id, timestamp, event_type ['classification'|'appe
 
 ---
 
+## Stretch: reviewer resolves an appeal
+
+Closes the loop the labels promise ("a person will review it").
+
+**`POST /appeals/<appeal_id>/resolve`**
+
+Request:
+```json
+{ "decision": "upheld | overturned", "reviewer_id": "1–100 chars", "reviewer_notes": "10–2,000 chars, required" }
+```
+
+- **`upheld`:** the reviewer agrees with the original label. Content status → `appeal_upheld`. The label is unchanged, with the suffix: *"A person reviewed the creator's appeal and kept this label."*
+- **`overturned`:** the reviewer agrees with the creator. Content status → `appeal_overturned`, and the label a reader sees is replaced with: *"Human-written (confirmed on review). Our automated checks originally labeled this "{original headline}", but a person reviewed the creator's appeal and overturned that result."*
+- **The original `attribution` and `confidence` are never changed.** They're the record of what the system decided. The review is stored alongside them.
+- **Notes are required,** so every resolution is explainable later. "Overturned" with no reason teaches nothing.
+
+**In one transaction:** update the appeal (decision, `reviewer_id`, notes, `resolved_at`), move the content status from `under_review` to the new status (only if it's still `under_review`), and append an `appeal_resolved` audit entry with the original attribution and confidence, the decision, the reviewer and the notes.
+
+**Errors:** `400` bad decision / missing notes · `404` unknown `appeal_id` · `409` already resolved.
+
+**Queue:** `GET /appeals?status=` also accepts `appeal_upheld` and `appeal_overturned`, so resolved appeals can be listed.
+
+**Why overturned results become "human-written" and not "uncertain":** an appeal is the creator saying "I wrote this." A reviewer overturning the label is agreeing with that claim.
+
+---
+
 ## Open decisions
 
-- **No reviewer authentication.** `GET /appeals` and `GET /log` are open. That's acceptable for a class project, but in production they'd need admin auth.
-- **Reviewer resolution** (`POST /appeals/<id>/resolve` → `upheld` / `overturned`, logged to the audit log) is the first stretch feature. Update this doc before building it.
+- **No reviewer authentication.** `GET /appeals`, `GET /log` and `POST /appeals/<id>/resolve` are open. That's acceptable for a class project, but in production they'd need reviewer accounts. `reviewer_id` is self-reported here.
+- **Reviewer resolution:** built as the first stretch feature (spec above).
 - **Groq model (resolved 2026-10-11).** `llama-3.3-70b-versatile` is not available on my account, so signal 1 uses `openai/gpt-oss-120b`, the largest general model available. I tested it with `temperature=0` + JSON mode.
 - **Heuristic mappings and thresholds are v1 starting values** until the M4 calibration run.

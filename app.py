@@ -6,11 +6,12 @@ from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from audit_log import (
-    appeal_queue, get_content, init_db, now, read_log, record_appeal, save_submission,
+    appeal_queue, get_appeal, get_content, init_db, now, read_log, record_appeal, resolve_appeal,
+    save_submission,
 )
 from detection.heuristic_signal import get_heuristic_signal
 from detection.llm_signal import get_llm_signal
-from labels import UNDER_REVIEW_SUFFIX, build_label
+from labels import build_label, display_label
 from scoring import score
 
 app = Flask(__name__)
@@ -29,7 +30,8 @@ MIN_REASONING_CHARS = 10
 MAX_REASONING_CHARS = 2_000
 MAX_EVIDENCE_CHARS = 2_000
 APPEALABLE = {"high_ai", "uncertain"}
-APPEAL_STATUSES = {"classified", "under_review"}
+RESOLUTION_STATUSES = {"upheld": "appeal_upheld", "overturned": "appeal_overturned"}
+QUEUE_STATUSES = {"under_review", *RESOLUTION_STATUSES.values()}
 
 
 def error(message, status):
@@ -162,8 +164,8 @@ def appeal():
 
     if content["attribution"] not in APPEALABLE:
         return error("This submission was labeled likely human-written, so there is nothing to appeal.", 400)
-    if content["status"] == "under_review":
-        return error("This submission already has an appeal under review.", 409)
+    if content["status"] != "classified":
+        return error("This submission has already been appealed.", 409)
 
     appeal_id = str(uuid.uuid4())
     recorded = record_appeal(
@@ -190,7 +192,7 @@ def appeal():
         },
     )
     if not recorded:
-        return error("This submission already has an appeal under review.", 409)
+        return error("This submission has already been appealed.", 409)
 
     return jsonify({
         "appeal_id": appeal_id,
@@ -211,17 +213,16 @@ def view_content(content_id):
     if content is None:
         return error("No submission found with that content_id.", 404)
 
-    label = content["label"]
-    if content["status"] == "under_review":
-        label = f"{label} {UNDER_REVIEW_SUFFIX}"
     appeal = content["appeal"]
     return jsonify({
         "content_id": content["content_id"],
         "creator_id": content["creator_id"],
         "status": content["status"],
+        # attribution and confidence are the original automated decision, never edited;
+        # label is what a reader sees now, including any review outcome.
         "attribution": content["attribution"],
         "confidence": content["confidence"],
-        "label": label,
+        "label": display_label(content["label"], content["status"]),
         "why": content["why"],
         "decided_by": content["decided_by"],
         "scoring_version": content["scoring_version"],
@@ -230,6 +231,9 @@ def view_content(content_id):
             "appeal_id": appeal["appeal_id"],
             "creator_reasoning": appeal["creator_reasoning"],
             "filed_at": appeal["created_at"],
+            "decision": appeal["decision"],
+            "reviewer_notes": appeal["reviewer_notes"],
+            "resolved_at": appeal["resolved_at"],
         },
     })
 
@@ -238,9 +242,77 @@ def view_content(content_id):
 def view_appeals():
     # Reviewer queue. In a real system this would require reviewer auth.
     status = request.args.get("status", "under_review")
-    if status not in APPEAL_STATUSES:
-        return error(f"'status' must be one of: {', '.join(sorted(APPEAL_STATUSES))}.", 400)
+    if status not in QUEUE_STATUSES:
+        return error(f"'status' must be one of: {', '.join(sorted(QUEUE_STATUSES))}.", 400)
     return jsonify({"status": status, "appeals": appeal_queue(status)})
+
+
+@app.route("/appeals/<appeal_id>/resolve", methods=["POST"])
+def resolve(appeal_id):
+    # A reviewer's decision on an appeal. In a real system this would require reviewer auth.
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return error("Request body must be a JSON object.", 400)
+
+    decision = data.get("decision")
+    if decision not in RESOLUTION_STATUSES:
+        return error(f"'decision' must be one of: {', '.join(sorted(RESOLUTION_STATUSES))}.", 400)
+    reviewer_id = data.get("reviewer_id")
+    if not isinstance(reviewer_id, str) or not reviewer_id.strip() or len(reviewer_id) > MAX_CREATOR_ID_CHARS:
+        return error(f"'reviewer_id' is required (1-{MAX_CREATOR_ID_CHARS} characters).", 400)
+    notes = data.get("reviewer_notes")
+    notes = notes.strip() if isinstance(notes, str) else ""
+    if not MIN_REASONING_CHARS <= len(notes) <= MAX_REASONING_CHARS:
+        return error(
+            f"'reviewer_notes' is required ({MIN_REASONING_CHARS}-{MAX_REASONING_CHARS:,} characters) "
+            "so every resolution can be explained later.", 400
+        )
+
+    appeal = get_appeal(appeal_id)
+    if appeal is None:
+        return error("No appeal found with that appeal_id.", 404)
+    if appeal["status"] != "under_review":
+        return error("This appeal has already been resolved.", 409)
+
+    new_status = RESOLUTION_STATUSES[decision]
+    resolved_at = now()
+    resolved = resolve_appeal(
+        appeal_id=appeal_id,
+        content_id=appeal["content_id"],
+        new_status=new_status,
+        resolution={
+            "decision": decision,
+            "reviewer_id": reviewer_id,
+            "reviewer_notes": notes,
+            "resolved_at": resolved_at,
+        },
+        audit_entry={
+            "content_id": appeal["content_id"],
+            "creator_id": appeal["creator_id"],
+            "event_type": "appeal_resolved",
+            "appeal_id": appeal_id,
+            "decision": decision,
+            "reviewer_id": reviewer_id,
+            "reviewer_notes": notes,
+            # The original automated decision, unchanged, so the log shows what was reviewed.
+            "attribution": appeal["attribution"],
+            "confidence": appeal["confidence"],
+            "decided_by": appeal["decided_by"],
+            "scoring_version": appeal["scoring_version"],
+            "status": new_status,
+        },
+    )
+    if not resolved:
+        return error("This appeal has already been resolved.", 409)
+
+    return jsonify({
+        "appeal_id": appeal_id,
+        "content_id": appeal["content_id"],
+        "decision": decision,
+        "status": new_status,
+        "original_attribution": appeal["attribution"],
+        "resolved_at": resolved_at,
+    })
 
 
 @app.route("/log", methods=["GET"])
