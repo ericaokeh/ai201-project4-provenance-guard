@@ -60,6 +60,32 @@ POST /appeal
 }
 ```
 
+**Why `creator_id` and `appeal_token` are required, beyond `content_id` and `creator_reasoning`:** `content_id`s appear in `GET /log` and `GET /appeals`, so on its own a `content_id` would let anyone dispute anyone's work. The token is returned only to the original submitter, which keeps appeals in the creator's hands.
+
+**Try the full flow** (server running; copy-paste into a terminal):
+
+```bash
+# 1. Submit text and save the response
+curl -s -X POST http://127.0.0.1:5000/submit \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Artificial intelligence represents a transformative paradigm shift in modern society. It is important to note that while the benefits of AI are numerous, it is equally essential to consider the ethical implications. Furthermore, stakeholders across various sectors must collaborate to ensure responsible deployment.", "creator_id": "test-user-1"}' \
+  > submit.json
+
+# 2. Pull out the content_id and appeal_token from that response
+CONTENT_ID=$(python -c "import json; print(json.load(open('submit.json'))['content_id'])")
+TOKEN=$(python -c "import json; print(json.load(open('submit.json'))['appeal_token'])")
+
+# 3. Appeal it → 200, "status": "under_review"
+curl -s -X POST http://127.0.0.1:5000/appeal \
+  -H "Content-Type: application/json" \
+  -d "{\"content_id\": \"$CONTENT_ID\", \"creator_id\": \"test-user-1\", \"appeal_token\": \"$TOKEN\", \"creator_reasoning\": \"I wrote this myself for a class essay; my drafts are in Google Docs.\"}" \
+  | python -m json.tool
+
+# 4. Confirm: status is under_review, and the log has the appeal next to the original classification
+curl -s http://127.0.0.1:5000/content/$CONTENT_ID | python -m json.tool
+curl -s "http://127.0.0.1:5000/log?content_id=$CONTENT_ID" | python -m json.tool
+```
+
 - **Who:** only the original submitter. `/submit` returns a one-time `appeal_token`, and only its SHA-256 hash is stored. The appeal must match both the `creator_id` and the token. A mismatch on either returns the same `403`, so neither can be guessed separately. This is checked before anything else about the content is revealed.
 - **What can be appealed:** `high_ai` and `uncertain` results. Appealing `high_human` returns `400`. Each piece of content can be appealed once (`409` after that).
 - **What happens:** in one database transaction, the appeal is stored, the content's status changes from `classified` to `under_review`, and an `appeal` entry is appended to the audit log with the creator's reasoning and the original decision. **The original label is not changed or hidden**, and nothing is automatically re-classified.
